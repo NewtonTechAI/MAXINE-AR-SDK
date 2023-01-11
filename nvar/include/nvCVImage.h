@@ -323,6 +323,12 @@ NvCV_Status NvCV_API NvCVImage_Realloc(NvCVImage *im, unsigned width, unsigned h
 void NvCV_API NvCVImage_Dealloc(NvCVImage *im);
 
 
+//! Deallocate the image buffer from the image asynchronously on the specified stream. The image is not deallocated.
+//! param[in,out] im      the image whose buffer is to be deallocated.
+//! param[int]    stream  the CUDA stream on which the image buffer is to be deallocated..
+void NvCV_API NvCVImage_DeallocAsync(NvCVImage *im, struct CUstream_st *stream);
+
+
 //! Allocate a new image, with storage (C-style constructor).
 //! \param[in]      width     the desired width  of the image, in pixels.
 //! \param[in]      height    the desired height of the image, in pixels.
@@ -378,7 +384,7 @@ void NvCV_API NvCVImage_ComponentOffsets(NvCVImage_PixelFormat format, int *rOff
 //!    | RGB    --> RGB    |      X      |      X      |      X      |      X      |
 //!    | RGB    --> RGBA   |      X      |      X      |      X      |      X      |
 //!    | RGBA   --> Y      |      X      |      X      |             |             |
-//!    | RGBA   --> A      |             |      X      |             |             |
+//!    | RGBA   --> A      |      X      |             |             |             |
 //!    | RGBA   --> RGB    |      X      |      X      |      X      |      X      |
 //!    | RGBA   --> RGBA   |      X      |      X      |      X      |      X      |
 //!    | RGB    --> YUV420 |      X      |             |      X      |             |
@@ -532,6 +538,7 @@ NvCV_Status NvCV_API NvCVImage_TransferToYUV(
 
 //! Composite one source image over another using the given matte.
 //! This accommodates all RGB and RGBA formats, with u8 and f32 components.
+//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
 //! \param[in]  fg      the foreground source image.
 //! \param[in]  bg      the background source image.
 //! \param[in]  mat     the matte  Yu8   (or Au8)   image, indicating where the src should come through.
@@ -541,7 +548,6 @@ NvCV_Status NvCV_API NvCVImage_TransferToYUV(
 //! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
 //! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
 //!                              in the same address space (CPU or GPU).
-//! \bug  Though RGBA destinations are accommodated, the A channel is not updated at all.
 #if RTX_CAMERA_IMAGE == 0
 NvCV_Status NvCV_API NvCVImage_Composite(const NvCVImage *fg, const NvCVImage *bg, const NvCVImage *mat, NvCVImage *dst,
             struct CUstream_st *stream);
@@ -550,8 +556,11 @@ NvCV_Status NvCV_API NvCVImage_Composite(const NvCVImage *fg, const NvCVImage *b
 #endif // RTX_CAMERA_IMAGE == 1
 
 
-//! Composite one source image over another using the given matte.
+//! Composite one source image rectangular region over another using the given matte.
 //! This accommodates all RGB and RGBA formats, with u8 and f32 components.
+//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
+//! If the background is not opaque, it is recommended that all images be premultiplied by alpha,
+//! and mode 1 composition be used, to yield the most meaningful composite matte.
 //! \param[in]      fg      the foreground source image.
 //! \param[in]      fgOrg   the upper-left corner of the fg image to be composited (NULL implies (0,0)).
 //! \param[in]      bg      the background source image.
@@ -559,25 +568,57 @@ NvCV_Status NvCV_API NvCVImage_Composite(const NvCVImage *fg, const NvCVImage *b
 //! \param[in]      mat     the matte image, indicating where the src should come through.
 //!                         This determines the size of the rectangle to be composited.
 //!                         If this is multi-channel, the alpha channel is used as the matte.
-//! \param[in]      mode    the composition mode. Only 0 (straight alpha over) is implemented at this time.
+//! \param[in]      mode    the composition mode: 0 (straight alpha over) or 1 (premultiplied alpha over).
 //! \param[out]     dst     the destination image. This can be the same as fg or bg.
 //! \param[in]      dstOrg  the upper-left corner of the dst image to be updated (NULL implies (0,0)).
 //! \param[in]      stream  the CUDA stream on which the composition is to be performed.
 //! \note   If a smaller region of a matte is desired, a window can be created using
-//!         NvCVImage_InitView() for chunky or NvCVImage_Init() for planar pixels.
+//!         NvCVImage_InitView() for chunky pixels, as illustrated below in NvCVImage_CompositeRectA().
 //! \return NVCV_SUCCESS         if the operation was successful.
 //! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
 //! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
 //!                              in the same address space (CPU or GPU).
-//! \bug  Though RGBA destinations are accommodated, the A channel is not updated at all.
-//! \todo Accommodate premultiplied alpha, either as a flag in NvCVImage or as a different mode.
-//! \todo If the destination has an A channel, update it as per Adobe and Pixar.
 NvCV_Status NvCV_API NvCVImage_CompositeRect(
     const NvCVImage *fg,  const NvCVPoint2i *fgOrg,
     const NvCVImage *bg,  const NvCVPoint2i *bgOrg,
     const NvCVImage *mat, unsigned mode,
     NvCVImage       *dst, const NvCVPoint2i *dstOrg,
     struct CUstream_st *stream);
+
+
+//! Composite one RGBA or BGRA source image rectangular region over another RGB, BGR, RGBA or BGRA region.
+//! This accommodates all RGB and RGBA formats, with u8 and f32 components.
+//! If the bg has alpha, then the dst alpha is updated for use in subsequent composition.
+//! If the background is not opaque, it is recommended that all images be premultiplied by alpha,
+//! and mode 1 composition be used, to yield the most meaningful composite matte.
+//! \param[in]      fg      the foreground RGBA or BGRA source image.
+//! \param[in]      fgRect  a sub-rectangle of the fg image (NULL implies the whole image).
+//! \param[in]      bg      the background source image.
+//! \param[in]      bgOrg   the upper-left corner of the bg image to be composited (NULL implies (0,0)).
+//! \param[in]      mode    the composition mode: 0 (straight alpha over) or 1 (premultiplied alpha over).
+//! \param[out]     dst     the destination image. This can be the same as fg or bg.
+//! \param[in]      dstOrg  the upper-left corner of the dst image to be updated (NULL implies (0,0)).
+//! \param[in]      stream  the CUDA stream on which the composition is to be performed.
+//! \return NVCV_SUCCESS         if the operation was successful.
+//! \return NVCV_ERR_PIXELFORMAT if the pixel format is not accommodated.
+//! \return NVCV_ERR_MISMATCH    if either the fg & bg & dst formats do not match, or if fg & bg & dst & mat are not
+//!                              in the same address space (CPU or GPU).
+//! \bug  fgRect will only work for chunky images, not planar.
+#ifdef __cplusplus
+inline NvCV_Status NvCVImage_CompositeRectA(
+    const NvCVImage *fg, const NvCVRect2i  *fgRect,
+    const NvCVImage *bg, const NvCVPoint2i *bgOrg,
+    unsigned mode,
+    NvCVImage       *dst, const NvCVPoint2i *dstOrg,
+    struct CUstream_st *stream
+) {
+  if (fgRect) {
+    NvCVImage fgView(const_cast<NvCVImage*>(fg), fgRect->x, fgRect->y, fgRect->width, fgRect->height);
+    return NvCVImage_CompositeRect(&fgView, nullptr, bg, bgOrg, &fgView, mode, dst, dstOrg, stream);
+  }
+  return NvCVImage_CompositeRect(fg, nullptr, bg, bgOrg, fg, mode, dst, dstOrg, stream);
+}
+#endif // __cplusplus
 
 
 //! Composite a source image over a constant color field using the given matte.
@@ -592,7 +633,6 @@ NvCV_Status NvCV_API NvCVImage_CompositeRect(
 //! \return NVCV_ERR_MISMATCH    if fg & mat & dst & bgColor are not in the same address space (CPU or GPU).
 //! \note   The bgColor must remain valid until complete; this is an important consideration especially if
 //!         the buffers are on the GPU and NvCVImage_CompositeOverConstant() runs asynchronously.
-//! \bug    Though RGBA destinations are accommodated, the A channel is not updated at all.
 NvCV_Status NvCV_API NvCVImage_CompositeOverConstant(
 #if RTX_CAMERA_IMAGE == 0
     const NvCVImage *src, const NvCVImage *mat, const void *bgColor, NvCVImage *dst, struct CUstream_st *stream
@@ -629,6 +669,23 @@ NvCV_Status NvCV_API NvCVImage_FlipY(const NvCVImage *src, NvCVImage *dst);
 NvCV_Status NvCV_API NvCVImage_GetYUVPointers(NvCVImage *im,
   unsigned char **y, unsigned char **u, unsigned char **v,
   int *yPixBytes, int *cPixBytes, int *yRowBytes, int *cRowBytes);
+
+
+//! Sharpen an image.
+//! The src and dst should be the same type - conversions are not performed.
+//! This function is only implemented for NVCV_CHUNKY NVCV_U8 pixels, of format NVCV_RGB or NVCV_BGR.
+//! \param[in]  sharpness the sharpness strength, calibrated so that 1 and 2 yields Adobe's Sharpen and Sharpen More.
+//! \param[in]  src       the source image to be sharpened.
+//! \param[out] dst       the resultant image (may be the same as the src).
+//! \param[in]  stream    the CUDA stream on which to perform the computations.
+//! \param[in]  tmp       a temporary working image. This can be NULL, but may result in lower performance.
+//!                       It is best if it resides on the same processor (CPU or GPU) as the destination.
+//! @return     NVCV_SUCCESS          if the operation completed successfully.
+//!             NVCV_ERR_MISMATCH     if the source and destination formats are different.
+//!             NVCV_ERR_PIXELFORMAT  if the function has not been implemented for the chosen pixel type.
+
+NvCV_Status NvCV_API NvCVImage_Sharpen(float sharpness, const NvCVImage *src, NvCVImage *dst,
+  struct CUstream_st *stream, NvCVImage *tmp);
 
 
 #ifdef __cplusplus

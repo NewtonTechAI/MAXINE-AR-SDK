@@ -107,11 +107,17 @@ typedef struct LandmarksProperties {
 
 class FaceEngine {
  public:
-  enum Err { errNone, errGeneral, errRun, errInitialization, errRead, errEffect, errParameter };
+  enum Err { errNone, errGeneral, errRun, errInitialization, errRead, errEffect, errParameter, errNoFaceDetected };
   int input_image_width, input_image_height, input_image_pitch;
   const LandmarksProperties LANDMARKS_INFO[2] = {
+           { 68,  15.0f }, // number of landmark points, confidence threshold value
+           { 126, 15.0f}, // 
+  };
+
+  // Keep Older Confidence Threshold for Linux Models.
+  const LandmarksProperties LANDMARKS_INFO_UNIX[2] = {
            { 68,  10.0f }, // number of landmark points, confidence threshold value
-           { 126, 5.0f}
+           { 126, 5.0f}, // 
   };
 
   void setInputImageWidth(int width) { input_image_width = width; }
@@ -121,9 +127,9 @@ class FaceEngine {
   int getInputImagePitch() { return input_image_pitch = input_image_width * 3 * sizeof(unsigned char); }
   void setFaceModel(const char *faceModel) { face_model = faceModel; }
 
-  Err createFeatures(const char* modelPath, unsigned int _batchSize = 1);
+  Err createFeatures(const char* modelPath, unsigned int _batchSize = 1, unsigned int mode = 0);
   Err createFaceDetectionFeature(const char* modelPath, CUstream stream);
-  Err createLandmarkDetectionFeature(const char* modelPath, unsigned int batchSize, CUstream stream);
+  Err createLandmarkDetectionFeature(const char* modelPath, unsigned int batchSize, CUstream stream, unsigned int mode = 0);
   Err createFaceFittingFeature(const char* modelPath, CUstream stream);
   void destroyFeatures();
   void destroyFaceDetectionFeature();
@@ -138,9 +144,9 @@ class FaceEngine {
   void releaseLandmarkDetectionIOParams();
   void releaseFaceFittingIOParams();
 
-  unsigned findFaceBoxes();
+  NvCV_Status findFaceBoxes(unsigned &num_boxes);
   NvAR_Rect* getLargestBox();
-  NvCV_Status findLandmarks();
+  FaceEngine::Err findLandmarks();
   NvAR_BBoxes* getBoundingBoxes();
   NvAR_Point2f* getLandmarks();
   NvAR_Quaternion* getPose();
@@ -148,9 +154,9 @@ class FaceEngine {
   float getAverageLandmarksConfidence();
   void enlargeAndSquarifyImageBox(float enlarge, NvAR_Rect& box, int FLAG_variant);
   static void jiggleBox(std::mt19937& ran, float minMag, float maxMag, const NvAR_Rect& cleanBox, NvAR_Rect& noisyBox);
-  unsigned findLargestFaceBox(NvAR_Rect& faceBox, int variant = 0);
-  unsigned acquireFaceBox(cv::Mat& src, NvAR_Rect& faceBox, int variant = 0); 
-  unsigned acquireFaceBoxAndLandmarks(cv::Mat& src, NvAR_Point2f* refMarks, NvAR_Rect& faceBox, int variant = 0);
+  FaceEngine::Err findLargestFaceBox(NvAR_Rect& faceBox, int variant = 0);
+  FaceEngine::Err acquireFaceBox(cv::Mat& src, NvAR_Rect& faceBox,int variant = 0); 
+  FaceEngine::Err acquireFaceBoxAndLandmarks(cv::Mat& src, NvAR_Point2f* refMarks, NvAR_Rect& faceBox, int variant = 0);
   Err fitFaceModel(cv::Mat& frame);
   NvAR_FaceMesh* getFaceMesh();
   NvAR_RenderingParams* getRenderingParams();
@@ -161,7 +167,8 @@ class FaceEngine {
   int getNumExpressionCoefficients();
   Err setNumLandmarks(int);
   int getNumLandmarks() { return numLandmarks; }
-  void DrawPose(const cv::Mat& src, const NvAR_Quaternion* pose);
+  void DrawPose(const cv::Mat& src, const NvAR_Quaternion* pose) const;
+  std::array<float, 2> GetAverageLandmarkPositionInGlSpace() const;
 
   NvCVImage inputImageBuffer{}, tmpImage{}, outputImageBuffer{};
   NvAR_FeatureHandle faceDetectHandle{}, landmarkDetectHandle{}, faceFitHandle{};
@@ -169,6 +176,8 @@ class FaceEngine {
   std::vector<float> facial_landmarks_confidence;
   std::vector<NvAR_Quaternion> facial_pose;
   NvAR_FaceMesh* face_mesh{};
+  std::vector<NvAR_Vector3f> m_vertices;
+  std::vector<NvAR_Vector3u16> m_triangles;
   NvAR_RenderingParams* rendering_params{};
   std::vector<float> shapeEigenvalues, expressionCoefficients;
   CUstream stream{};
@@ -180,7 +189,7 @@ class FaceEngine {
   int numLandmarks;
   float confidenceThreshold;
   std::string face_model;
-
+  
   bool bStabilizeFace;
   bool bUseOTAU;
   char *fdOTAModelPath, *ldOTAModelPath;
